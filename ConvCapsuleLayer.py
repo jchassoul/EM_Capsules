@@ -46,13 +46,13 @@ class ConvCapsuleLayer(nn.Module):
                                              kernel_size * kernel_size * in_channel)
             
         else:
-            self.no_routing_capsule = nn.Conv2d(in_channel * in_dim,
-                                                out_channel * (out_dim+1),
+            self.no_routing_capsule = nn.Conv2d(in_channel * (in_dim + 1),
+                                                out_channel * (out_dim + 1),
                                                 kernel_size=kernel_size,
                                                 stride=stride)
     
     def squash(self, tensor):
-        # this operation may cause error
+        # no sure about this operation, may cause error
         size = tensor.size()
         if (len(tensor.size()) < 5):
             # [batch, channel, h, w] --> [batch, cap_channel, cap_dim, h, w]
@@ -69,25 +69,21 @@ class ConvCapsuleLayer(nn.Module):
         return range(w*self.stride, w*self.stride+self.kernel_size)
             
     def EM_routing(self, votes, activations):
-        beta_v = Variable(torch.randn(self.out_channel, self.out_h, self.out_w))
-        beta_a = Variable(torch.randn(self.out_channel, self.out_h, self.out_w))
+        beta_v = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
+        beta_a = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
         
-        R = (1. / self.out_channel) * torch.ones(self.batches, self.in_channel, self.kernel_size, self.kernel_size, 
-                                                 self.out_channel, self.out_h, self.out_w)
+        R = (1. / self.out_channel) * Variable(torch.ones(self.batches, self.in_channel, self.kernel_size, self.kernel_size, 
+                                                          self.out_channel, self.out_h, self.out_w)).cuda()
         votes_reshape = votes.view(self.batches, self.in_channel, self.kernel_size, self.kernel_size, 
                                    self.out_channel, self.out_dim, self.out_h, self.out_w)
         activations = activations.squeeze(dim=2)
         
         a_reshape = [activations[:, :, :, self.down_w(w)][:,:,self.down_h(h),:] for h in range(self.out_h) for w in range(self.out_w)]
-#        a_reshape = []
-#        for h in range(self.out_h):
-#            for w in range(self.out_w):
-#                a_reshape.append(activations[:, :, self.down_h(h), self.down_w(w)])
         a_stack = torch.stack(a_reshape, dim=4).view(self.batches, self.in_channel, self.kernel_size, self.kernel_size, self.out_h, self.out_w)
         for _ in range(self.routing):
             # M-STEP
             # r_hat.size = [b, in_c, k, k, out_c, out_h, out_w]
-            r_hat = a_stack[:,:,:,:,None,:,:] * R
+            r_hat = R * a_stack[:,:,:,:,None,:,:]
             # sum_r_hat.size = [b, out_c, out_h, out_w]
             sum_r_hat = r_hat.sum(3).sum(2).sum(1)
             # u_h.size = [b, out_c, out_d, out_h, out_w]
@@ -101,7 +97,7 @@ class ConvCapsuleLayer(nn.Module):
             
             # E-STEP
             # sigma_product.size = [b, out_c, out_h, out_w]
-            sigma_product = torch.ones(self.batches, self.out_channel, self.out_h, self.out_w)
+            sigma_product = Variable(torch.ones(self.batches, self.out_channel, self.out_h, self.out_w)).cuda()
             for dm in range(self.out_dim):
                 sigma_product = sigma_product * 2 * 3.1416 *sigma_h_square[:,:,dm,:,:]
             # p_c.size = [b, in_c, k, k, out_c, out_h, out_w]
@@ -122,9 +118,7 @@ class ConvCapsuleLayer(nn.Module):
             activations = x_reshape[:,:,0,:,:]
             vector = x_reshape[:,:,1:,:,:].contiguous().view(size[0], -1, size[2], size[3])
             # sampling
-            # z[batch, k*k*vhannel, out_h, out_w]
-            
-            #x_sample = torch.cat([torch.stack([vector[:, :, k_h+i, k_w+j] for i in torch.arange(0, out_h*self.stride, self.stride) for j in torch.arange(0, out_w*self.stride, self.stride)], dim=2).view(size[0],size[1],out_h,out_w) for k_h, k_w in range(self.kernel_size)], dim=1)
+            # z[batch, k*k*vhannel, out_h, out_w]            
             maps = []
             for k_h in range(self.kernel_size):
                 for k_w in range(self.kernel_size):
@@ -134,11 +128,8 @@ class ConvCapsuleLayer(nn.Module):
                     maps.append(onemap)
             # maps channel is kernal_size**2 * in_channel * in_dim
             map_ = torch.cat(maps, dim=1)
+            
             # votes.size: (out_h * out_w) * k * k * in_channel * out_channel( * D)
-            
-#            init.xavier_uniform(self.routing_capsule.weight)
-#            init.constant(self.routing_capsule.bias, 0.1)
-            
             votes = self.routing_capsule(map_)
             # output_a.size = [b, out_c, out_h, out_w]
             # output_v.size = [b, out_c, out_d, out_h, out_w]
@@ -149,4 +140,13 @@ class ConvCapsuleLayer(nn.Module):
             # outputs [batch, channel, out_h, out_w]
             outputs = self.no_routing_capsule(x)
             return self.squash(outputs)
-        
+
+def main():
+    torch.cuda.manual_seed(1)
+    layer = ConvCapsuleLayer(2, 2, 2, 2, 3, 2, routing=3, lamda=Variable(torch.rand(1)).cuda())
+    layer.cuda()
+    x = Variable(torch.rand(2,6,5,5))
+    y = layer(x.cuda())
+    
+if __name__ == '__main__':
+    main()
