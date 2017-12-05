@@ -16,13 +16,13 @@ import torch.nn.functional as F
 
 from torch.nn import init
 
-class ConvCapsuleLayer(nn.Module):
+class ConvCapsule(nn.Module):
     def __init__(self, 
                  in_channel, in_dim,
                  out_channel, out_dim, 
                  kernel_size, stride,
-                 routing, lamda):
-        super(ConvCapsuleLayer, self).__init__()
+                 routing = 0):
+        super(ConvCapsule, self).__init__()
         
         self.in_channel = in_channel
         self.in_dim = in_dim
@@ -31,9 +31,10 @@ class ConvCapsuleLayer(nn.Module):
         self.routing = routing
         self.kernel_size = kernel_size
         self.stride = stride
-        self.lamda = lamda
         
         if self.routing:
+            self.beta_v = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
+            self.beta_a = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
             self.routing_capsule = nn.Conv2d(in_channels=
                                              kernel_size * kernel_size *
                                              in_dim * in_channel,
@@ -69,11 +70,9 @@ class ConvCapsuleLayer(nn.Module):
         return range(w*self.stride, w*self.stride+self.kernel_size)
             
     def EM_routing(self, votes, activations):
-        beta_v = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
-        beta_a = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
-        
+        # routing coefficient
         R = (1. / self.out_channel) * Variable(torch.ones(self.batches, self.in_channel, self.kernel_size, self.kernel_size, 
-                                                          self.out_channel, self.out_h, self.out_w)).cuda()
+                                                          self.out_channel, self.out_h, self.out_w), requires_grad=False).cuda()
         votes_reshape = votes.view(self.batches, self.in_channel, self.kernel_size, self.kernel_size, 
                                    self.out_channel, self.out_dim, self.out_h, self.out_w)
         activations = activations.squeeze(dim=2)
@@ -91,13 +90,13 @@ class ConvCapsuleLayer(nn.Module):
             # sigma_h_square.size = [b, out_c, out_d, out_h, out_w]
             sigma_h_square = torch.sum(r_hat[:,:,:,:,:,None,:,:] * (votes_reshape - u_h[:,None,None,None,:,:,:,:]) ** 2, dim=3).sum(2).sum(1) / sum_r_hat[:,:,None,:,:]
             # cost_h.size = [b, out_c, out_d, out_h, out_w]
-            cost_h = (beta_v[None,:,None,:,:] + torch.log(torch.sqrt(sigma_h_square))) * sum_r_hat[:, :, None, :, :]
+            cost_h = (self.beta_v[None,:,None,:,:] + torch.log(torch.sqrt(sigma_h_square))) * sum_r_hat[:, :, None, :, :]
             # a_hat.size = [b, out_c, out_h, out_w]
-            a_hat = torch.sigmoid(self.lamda * (beta_a[None,:,:,:] - cost_h.sum(2)))
+            a_hat = torch.sigmoid(self.lamda * (self.beta_a[None,:,:,:] - cost_h.sum(2)))
             
             # E-STEP
             # sigma_product.size = [b, out_c, out_h, out_w]
-            sigma_product = Variable(torch.ones(self.batches, self.out_channel, self.out_h, self.out_w)).cuda()
+            sigma_product = Variable(torch.ones(self.batches, self.out_channel, self.out_h, self.out_w), requires_grad=False).cuda()
             for dm in range(self.out_dim):
                 sigma_product = sigma_product * 2 * 3.1416 *sigma_h_square[:,:,dm,:,:]
             # p_c.size = [b, in_c, k, k, out_c, out_h, out_w]
@@ -106,8 +105,9 @@ class ConvCapsuleLayer(nn.Module):
             R = a_hat[:,None,None,None,:,:,:] * p_c / torch.sum(a_hat[:,None,None,None,:,:,:] * p_c, dim=6, keepdim=True).sum(dim=5, keepdim=True).sum(dim=4, keepdim=True)
         return a_hat, u_h
                
-    def forward(self, x):
+    def forward(self, x, lamda=0):
         if self.routing:
+            self.lamda = lamda
             size = x.size()
             self.batches = size[0]
             out_h = int((size[2] - self.kernel_size) / self.stride) + 1
@@ -134,16 +134,16 @@ class ConvCapsuleLayer(nn.Module):
             # output_a.size = [b, out_c, out_h, out_w]
             # output_v.size = [b, out_c, out_d, out_h, out_w]
             output_a, output_v = self.EM_routing(votes, activations)
-            outputs = torch.cat([output_a[:,:,None,:,:], self.squash(output_v)], dim=2)
+            outputs = torch.cat([output_a[:,:,None,:,:], output_v], dim=2)
             return outputs.view(self.batches, self.out_channel * (self.out_dim + 1), self.out_h, self.out_w)
         else:
             # outputs [batch, channel, out_h, out_w]
             outputs = self.no_routing_capsule(x)
-            return self.squash(outputs)
+            return outputs
 
 def main():
     torch.cuda.manual_seed(1)
-    layer = ConvCapsuleLayer(2, 2, 2, 2, 3, 2, routing=3, lamda=Variable(torch.rand(1)).cuda())
+    layer = ConvCapsule(2, 2, 2, 2, 3, 2, routing=3, lamda=Variable(torch.rand(1)).cuda())
     layer.cuda()
     x = Variable(torch.rand(2,6,5,5))
     y = layer(x.cuda())
