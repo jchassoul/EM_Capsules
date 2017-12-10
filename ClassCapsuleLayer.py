@@ -78,7 +78,7 @@ class ClassCapsule(nn.Module):
         coordinate_x = Variable(torch.FloatTensor(range(self.h))/COORDINATE_SCALE, requires_grad=False).cuda()
         coordinate_y = Variable(torch.FloatTensor(range(self.w))/COORDINATE_SCALE, requires_grad=False).cuda()
         vector[:,:,0,:,:] = vector[:,:,0,:,:] + coordinate_x[None,None,:,None]
-        vector[:,:,1,:,:] += coordinate_y[None,None,None,None]
+        vector[:,:,1,:,:] += coordinate_y[None,None,None,:]
         
 #        for i in range(self.h):
 #            for j in range(self.w):
