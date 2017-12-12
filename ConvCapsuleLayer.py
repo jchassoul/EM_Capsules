@@ -33,8 +33,6 @@ class ConvCapsule(nn.Module):
         self.stride = stride
         
         if self.routing:
-            self.beta_v = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
-            self.beta_a = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
             self.routing_capsule = nn.Conv2d(in_channels=
                                              kernel_size * kernel_size *
                                              in_dim * in_channel,
@@ -107,13 +105,18 @@ class ConvCapsule(nn.Module):
                
     def forward(self, x, lamda=0):
         if self.routing:
-            self.lamda = lamda
             size = x.size()
             self.batches = size[0]
             out_h = int((size[2] - self.kernel_size) / self.stride) + 1
             out_w = int((size[3] - self.kernel_size) / self.stride) + 1
             self.out_h = out_h
             self.out_w = out_w
+            try:
+                self.beta_v
+            except AttributeError:
+                self.beta_v = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
+                self.beta_a = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
+            self.lamda = lamda
             x_reshape = x.view(size[0], self.in_channel, 1+self.in_dim, size[2], size[3])
             activations = x_reshape[:,:,0,:,:]
             vector = x_reshape[:,:,1:,:,:].contiguous().view(size[0], -1, size[2], size[3])
