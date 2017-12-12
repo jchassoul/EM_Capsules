@@ -15,6 +15,7 @@ from torchvision import datasets, transforms
 import torch.nn.functional as F
 
 from torch.nn import init
+import pdb
 
 COORDINATE_SCALE = 10.
 
@@ -60,12 +61,22 @@ class ClassCapsule(nn.Module):
             
             sigma_product = Variable(torch.ones(self.batches, self.classes), requires_grad=False).cuda()
             for dm in range(self.out_dim):
-                sigma_product *= 2 * 3.1416 * sigma_h_square[:,:,dm]
+                sigma_product = 2 * 3.1416 * sigma_product * sigma_h_square[:,:,dm]
             # p_c.size = [b, in_channel, classes, h, w]
             p_c = torch.exp(-torch.sum((votes_reshape - u_h[:,None,:,:,None,None])**2 / (2 * sigma_h_square[:,None,:,:,None,None]), dim=3)) / torch.sqrt(sigma_product[:,None,:,None,None])
             R = a_hat[:,None,:,None,None] * p_c / torch.sum(a_hat[:,None,:,None,None] * p_c, dim=2, keepdim=True)
         return a_hat, u_h
-               
+
+    def CoordinateAddition(self, vector):
+        output = Variable(torch.zeros(vector.size())).cuda()
+        coordinate_x = Variable(torch.FloatTensor(torch.arange(0, self.h))/COORDINATE_SCALE, requires_grad=False).cuda()
+        coordinate_y = Variable(torch.FloatTensor(torch.arange(0, self.w))/COORDINATE_SCALE, requires_grad=False).cuda()
+        output[:,:,0,:,:] = vector[:,:,0,:,:] + coordinate_x[None,None,:,None]
+        output[:,:,1,:,:] = vector[:,:,1,:,:] + coordinate_y[None,None,None,:]
+        if output.size(2) >2:
+            output[:,:,2:,:,:] = vector[:,:,2:,:,:]
+        return output
+    
     def forward(self, x, lamda=0):
         self.lamda = lamda
         size = x.size()
@@ -74,20 +85,18 @@ class ClassCapsule(nn.Module):
         self.w = size[3]
         x_reshape = x.view(size[0], self.in_channel, 1+self.in_dim, size[2], size[3])
         activations = x_reshape[:,:,0,:,:]
-        vector = x_reshape[:,:,1:,:,:].contiguous()
-        coordinate_x = Variable(torch.FloatTensor(range(self.h))/COORDINATE_SCALE, requires_grad=False).cuda()
-        coordinate_y = Variable(torch.FloatTensor(range(self.w))/COORDINATE_SCALE, requires_grad=False).cuda()
-        vector[:,:,0,:,:] = vector[:,:,0,:,:] + coordinate_x[None,None,:,None]
-        vector[:,:,1,:,:] += coordinate_y[None,None,None,:]
+        vector = x_reshape[:,:,1:,:,:]
+        vec = self.CoordinateAddition(vector)
+        
         
 #        for i in range(self.h):
 #            for j in range(self.w):
 #                vector[:,:,0,i,j] += i/10.
 #                vector[:,:,1,i,j] += j/10.
         # vector.size = [b,in_channel*in_dim, h,w]
-        vector = vector.view(size[0], -1, size[2], size[3]) 
+        vec = vec.view(size[0], -1, size[2], size[3]) 
         # votes.size = [b, in_channel*out_dum*classes, h,w]
-        votes = self.capsules(vector)
+        votes = self.capsules(vec)
         # output_a.size = [b, classes]
         # output_v.size = [b, classes, out_dim]
         output_a, output_v = self.EM_routing(votes, activations)
@@ -97,9 +106,10 @@ def main():
     torch.cuda.manual_seed(1)
     layer = ClassCapsule(2, 2, 2, 2, 3)
     layer.cuda()
-    x = Variable(torch.rand(2,6,5,5))
+    x = Variable(torch.rand(3,6,5,5))
     lamda=Variable(torch.rand(1))
     y = layer(x.cuda(), lamda.cuda())
+    print(y.size())
     
 if __name__ == '__main__':
     main()
