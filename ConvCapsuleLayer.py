@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 Matrix Capsules with EM Routing
 https://openreview.net/pdf?id=HJWLfGWRb
@@ -7,149 +8,134 @@ https://openreview.net/pdf?id=HJWLfGWRb
 PyTorch implementation by Huang Zhen @ MultimediaGroup USTC
 """
 
+from __future__ import print_function
+import argparse
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.autograd import Variable
-from torchvision import datasets, transforms
 import torch.nn.functional as F
+import torch.optim as optim
+from torchvision import datasets, transforms
+from torch.autograd import Variable
 
-from torch.nn import init
+from ConvCapsuleLayer import ConvCapsule
+from ClassCapsuleLayer import ClassCapsule
 
-class ConvCapsule(nn.Module):
-    def __init__(self, 
-                 in_channel, in_dim,
-                 out_channel, out_dim, 
-                 kernel_size, stride,
-                 routing = 0):
-        super(ConvCapsule, self).__init__()
-        
-        self.in_channel = in_channel
-        self.in_dim = in_dim
-        self.out_channel = out_channel
-        self.out_dim = out_dim
-        self.routing = routing
-        self.kernel_size = kernel_size
-        self.stride = stride
-        
-        if self.routing:
-            self.routing_capsule = nn.Conv2d(in_channels=
-                                             kernel_size * kernel_size *
-                                             in_dim * in_channel,
-                                             out_channels=
-                                             kernel_size * kernel_size *
-                                             out_dim * in_channel * out_channel,
-                                             kernel_size=1,
-                                             stride=1,
-                                             groups=
-                                             kernel_size * kernel_size * in_channel)
-            
-        else:
-            self.no_routing_capsule = nn.Conv2d(in_channel * (in_dim + 1),
-                                                out_channel * (out_dim + 1),
-                                                kernel_size=kernel_size,
-                                                stride=stride)
-    
-    def squash(self, tensor):
-        # no sure about this operation, may cause error
-        size = tensor.size()
-        if (len(tensor.size()) < 5):
-            # [batch, channel, h, w] --> [batch, cap_channel, cap_dim, h, w]
-            tensor = torch.stack(tensor.split(self.out_dim, dim=1), dim = 1)
-        squared_norm = (tensor ** 2).sum(dim=2, keepdim=True)
-        scale = squared_norm / (1 + squared_norm)
-        outputs = scale * tensor / torch.sqrt(squared_norm)
-        return outputs.view(size)
-    
-    def down_h(self, h):
-        return range(h*self.stride, h*self.stride+self.kernel_size)
-    
-    def down_w(self, w):
-        return range(w*self.stride, w*self.stride+self.kernel_size)
-            
-    def EM_routing(self, votes, activations):
-        # routing coefficient
-        R = (1. / self.out_channel) * Variable(torch.ones(self.batches, self.in_channel, self.kernel_size, self.kernel_size, 
-                                                          self.out_channel, self.out_h, self.out_w), requires_grad=False).cuda()
-        votes_reshape = votes.view(self.batches, self.in_channel, self.kernel_size, self.kernel_size, 
-                                   self.out_channel, self.out_dim, self.out_h, self.out_w)
-        activations = activations.squeeze(dim=2)
-        
-        a_reshape = [activations[:, :, :, self.down_w(w)][:,:,self.down_h(h),:] for h in range(self.out_h) for w in range(self.out_w)]
-        a_stack = torch.stack(a_reshape, dim=4).view(self.batches, self.in_channel, self.kernel_size, self.kernel_size, self.out_h, self.out_w)
-        for _ in range(self.routing):
-            # M-STEP
-            # r_hat.size = [b, in_c, k, k, out_c, out_h, out_w]
-            r_hat = R * a_stack[:,:,:,:,None,:,:]
-            # sum_r_hat.size = [b, out_c, out_h, out_w]
-            sum_r_hat = r_hat.sum(3).sum(2).sum(1)
-            # u_h.size = [b, out_c, out_d, out_h, out_w]
-            u_h = torch.sum(r_hat[:,:,:,:,:,None,:,:] * votes_reshape, dim=3).sum(2).sum(1) / sum_r_hat[:,:,None,:,:]
-            # sigma_h_square.size = [b, out_c, out_d, out_h, out_w]
-            sigma_h_square = torch.sum(r_hat[:,:,:,:,:,None,:,:] * (votes_reshape - u_h[:,None,None,None,:,:,:,:]) ** 2, dim=3).sum(2).sum(1) / sum_r_hat[:,:,None,:,:]
-            # cost_h.size = [b, out_c, out_d, out_h, out_w]
-            cost_h = (self.beta_v[None,:,None,:,:] + torch.log(torch.sqrt(sigma_h_square))) * sum_r_hat[:, :, None, :, :]
-            # a_hat.size = [b, out_c, out_h, out_w]
-            a_hat = torch.sigmoid(self.lamda * (self.beta_a[None,:,:,:] - cost_h.sum(2)))
-            
-            # E-STEP
-            # sigma_product.size = [b, out_c, out_h, out_w]
-            sigma_product = Variable(torch.ones(self.batches, self.out_channel, self.out_h, self.out_w), requires_grad=False).cuda()
-            for dm in range(self.out_dim):
-                sigma_product = sigma_product * 2 * 3.1416 *sigma_h_square[:,:,dm,:,:]
-            # p_c.size = [b, in_c, k, k, out_c, out_h, out_w]
-            p_c = torch.exp(-torch.sum((votes_reshape - u_h[:,None,None,None,:,:,:,:]) ** 2 / (2 * sigma_h_square[:,None,None,None,:,:,:,:]), dim=5) / torch.sqrt(sigma_product[:,None,None,None,:,:,:]))
-            # R,size = [b,in_c, k, k, out_c, out_h, out_w]
-            R = a_hat[:,None,None,None,:,:,:] * p_c / torch.sum(a_hat[:,None,None,None,:,:,:] * p_c, dim=6, keepdim=True).sum(dim=5, keepdim=True).sum(dim=4, keepdim=True)
-        return a_hat, u_h
-               
-    def forward(self, x, lamda=0):
-        if self.routing:
-            size = x.size()
-            self.batches = size[0]
-            out_h = int((size[2] - self.kernel_size) / self.stride) + 1
-            out_w = int((size[3] - self.kernel_size) / self.stride) + 1
-            self.out_h = out_h
-            self.out_w = out_w
-            try:
-                self.beta_v
-            except AttributeError:
-                self.beta_v = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
-                self.beta_a = Variable(torch.randn(self.out_channel, self.out_h, self.out_w)).cuda()
-            self.lamda = lamda
-            x_reshape = x.view(size[0], self.in_channel, 1+self.in_dim, size[2], size[3])
-            activations = x_reshape[:,:,0,:,:]
-            vector = x_reshape[:,:,1:,:,:].contiguous().view(size[0], -1, size[2], size[3])
-            # sampling
-            # z[batch, k*k*vhannel, out_h, out_w]            
-            maps = []
-            for k_h in range(self.kernel_size):
-                for k_w in range(self.kernel_size):
-                    onemap = [vector[:, :, k_h+i, k_w+j] for i in range(0, out_h*self.stride, self.stride) for j in range(0, out_w*self.stride, self.stride)]
-                    onemap = torch.stack(onemap, dim=2)
-                    onemap = onemap.view(size[0], onemap.size(1), out_h, out_w)
-                    maps.append(onemap)
-            # maps channel is kernal_size**2 * in_channel * in_dim
-            map_ = torch.cat(maps, dim=1)
-            
-            # votes.size: (out_h * out_w) * k * k * in_channel * out_channel( * D)
-            votes = self.routing_capsule(map_)
-            # output_a.size = [b, out_c, out_h, out_w]
-            # output_v.size = [b, out_c, out_d, out_h, out_w]
-            output_a, output_v = self.EM_routing(votes, activations)
-            outputs = torch.cat([output_a[:,:,None,:,:], output_v], dim=2)
-            return outputs.view(self.batches, self.out_channel * (self.out_dim + 1), self.out_h, self.out_w)
-        else:
-            # outputs [batch, channel, out_h, out_w]
-            outputs = self.no_routing_capsule(x)
-            return outputs
+NUM_CLASSES = 10
 
-def main():
-    torch.cuda.manual_seed(1)
-    layer = ConvCapsule(2, 2, 2, 2, 3, 2, routing=3, lamda=Variable(torch.rand(1)).cuda())
-    layer.cuda()
-    x = Variable(torch.rand(2,6,5,5))
-    y = layer(x.cuda())
-    
-if __name__ == '__main__':
-    main()
+# Training settings
+parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
+parser.add_argument('--batch-size', type=int, default=2, metavar='N',
+                    help='input batch size for training (default: 64)')
+parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
+                    help='input batch size for testing (default: 1000)')
+parser.add_argument('--epochs', type=int, default=10, metavar='N',
+                    help='number of epochs to train (default: 10)')
+parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
+                    help='learning rate (default: 0.01)')
+parser.add_argument('--momentum', type=float, default=0.5, metavar='M',
+                    help='SGD momentum (default: 0.5)')
+parser.add_argument('--no-cuda', action='store_true', default=False,
+                    help='disables CUDA training')
+parser.add_argument('--seed', type=int, default=1, metavar='S',
+                    help='random seed (default: 1)')
+parser.add_argument('--log-interval', type=int, default=10, metavar='N',
+                    help='how many batches to wait before logging training status')
+args = parser.parse_args()
+args.cuda = not args.no_cuda and torch.cuda.is_available()
+
+torch.manual_seed(args.seed)
+if args.cuda:
+    torch.cuda.manual_seed(args.seed)
+
+
+kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
+train_loader = torch.utils.data.DataLoader(
+    datasets.MNIST('../data', train=True, download=True,
+                   transform=transforms.Compose([
+                       transforms.ToTensor(),
+                       transforms.Normalize((0.1307,), (0.3081,))
+                   ])),
+    batch_size=args.batch_size, shuffle=True, **kwargs)
+test_loader = torch.utils.data.DataLoader(
+    datasets.MNIST('../data', train=False, transform=transforms.Compose([
+                       transforms.ToTensor(),
+                       transforms.Normalize((0.1307,), (0.3081,))
+                   ])),
+    batch_size=args.test_batch_size, shuffle=True, **kwargs)
+
+class CapsuleNet(nn.Module):
+    def __init__(self):
+        super(CapsuleNet, self).__init__()
+        self.Conv1 = ConvCapsule(1,0,32,0,5,2)
+        self.PrimaryCaps = ConvCapsule(32,0,32,16,1,1)
+        self.ConvCaps1 = ConvCapsule(32,16,32,16,3,2,routing=3)
+        self.ConvCaps2 = ConvCapsule(32,16,32,16,3,1,routing=3)
+        self.ClassCaps = ClassCapsule(32,16,10,16,routing=3)
+        
+    def forward(self, x, lamda):
+        x = F.relu(self.Conv1(x, lamda))
+        x = F.relu(self.PrimaryCaps(x, lamda))
+        x = F.sigmoid(self.ConvCaps1(x, lamda))
+        x = self.ConvCaps2(x, lamda)
+        x = self.ClassCaps(x, lamda)
+        return x
+
+def SpreadLoss(output, target, m):
+    one_shot_target = Variable(torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target.data.cpu()), requires_grad=False).cuda()
+#    batch_size = target.size(0)
+#    one_shot_target= Variable(torch.zeros(batch_size, 10)).cuda()
+#    for i in range(batch_size):
+#        one_shot_target[i, target.data[i]] = 1.0
+    a_t = torch.sum(output * one_shot_target, dim=1)
+    z = Variable(torch.zeros(output.size()), requires_grad=False).cuda()
+    loss = torch.sum((torch.max(z, m - (a_t[:,None] - output)))**2, dim=1) - m*m
+    return loss.sum() / target.size(0)
+
+model = CapsuleNet()
+if args.cuda:
+    model.cuda()
+
+optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
+
+def train(epoch, m, lamda):
+    model.train()
+    for batch_idx, (data, target) in enumerate(train_loader):
+        if args.cuda:
+            data, target = data.cuda(), target.cuda()
+        data, target = Variable(data), Variable(target)
+        optimizer.zero_grad()
+        output = model(data, lamda)
+        loss = SpreadLoss(output, target, m)
+        loss.backward()
+        optimizer.step()
+        if batch_idx % args.log_interval == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                100. * batch_idx / len(train_loader), loss.data[0]))
+
+def test(m, lamda):
+    model.eval()
+    test_loss = 0
+    correct = 0
+    for data, target in test_loader:
+        if args.cuda:
+            data, target = data.cuda(), target.cuda()
+        data, target = Variable(data, volatile=True), Variable(target)
+        output = model(data, lamda)
+        test_loss += SpreadLoss(output, target, m).data[0] # sum up batch loss
+        pred = output.data.max(1, keepdim=True)[1] # get the index of the max log-probability
+        correct += pred.eq(target.data.view_as(pred)).cpu().sum()
+
+    test_loss /= len(test_loader.dataset)
+    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+        test_loss, correct, len(test_loader.dataset),
+        100. * correct / len(test_loader.dataset)))
+
+
+for epoch in range(1, args.epochs + 1):
+    m = 0.2 + (0.9 - 0.2) * (epoch - 1) / args.epochs
+    start_lamda = 0.1
+    end_lamda = 0.9
+    lamda = start_lamda + (end_lamda - start_lamda) * (epoch - 1) / args.epochs
+    train(epoch, m, lamda)
+    test(m, lamda)
