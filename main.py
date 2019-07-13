@@ -24,7 +24,7 @@ NUM_CLASSES = 10
 
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
-parser.add_argument('--batch-size', type=int, default=2, metavar='N',
+parser.add_argument('--batch-size', type=int, default=64, metavar='N',
                     help='input batch size for training (default: 64)')
 parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
                     help='input batch size for testing (default: 1000)')
@@ -80,17 +80,11 @@ class CapsuleNet(nn.Module):
         x = self.ClassCaps(x, lamda)
         return x
 
-def SpreadLoss(output, target, m):
-    one_shot_target = Variable(torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target.data.cpu()), requires_grad=False).cuda()
-#    batch_size = target.size(0)
-#    one_shot_target= Variable(torch.zeros(batch_size, 10)).cuda()
-#    for i in range(batch_size):
-#        one_shot_target[i, target.data[i]] = 1.0
+def SpreadLoss(self, output, target, m):
+    one_shot_target = torch.sparse.torch.eye(NUM_CLASSES).index_select(dim=0, index=target)
     a_t = torch.sum(output * one_shot_target, dim=1)
-    z = Variable(torch.zeros(output.size()), requires_grad=False).cuda()
-    loss = torch.sum((torch.max(z, m - (a_t[:,None] - output)))**2, dim=1) - m*m
-    return loss.sum() / target.size(0)
-
+    loss = torch.sum(max(m - (a_t -output))**2, dim=1) - m**2
+    return loss
 model = CapsuleNet()
 if args.cuda:
     model.cuda()
